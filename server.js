@@ -48,6 +48,29 @@ const fetchOpts = {
 
 const s = (v) => (v == null ? "" : String(v).replace(/\0/g, ""));
 
+/** Parse JSON from Gemini/HTTP bodies; strips BOM, markdown fences, or leading junk. */
+function parseJsonSafe(raw, label) {
+  let t = String(raw ?? "").trim();
+  if (!t) throw new Error(`${label}: empty body`);
+  if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
+  const fence = t.match(/^```(?:json)?\s*([\s\S]*?)```$/im);
+  if (fence) t = fence[1].trim();
+  try {
+    return JSON.parse(t);
+  } catch (e1) {
+    const start = t.indexOf("{");
+    const end = t.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(t.slice(start, end + 1));
+      } catch (e2) {
+        /* fall through */
+      }
+    }
+    throw new Error(`${label}: ${e1.message}. Snippet: ${t.slice(0, 200)}`);
+  }
+}
+
 const roleCharsText = (rc) => {
   try {
     if (rc == null) return "";
@@ -130,11 +153,12 @@ async function upload(apiKey, fileBuffer, displayName, mimeType) {
   });
 
   const text = await upRes.text();
+
   let json;
   try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Upload bytes ${upRes.status}: ${text.slice(0, 800)}`);
+    json = parseJsonSafe(text, "upload-bytes");
+  } catch (e) {
+    throw new Error(`Upload bytes ${upRes.status}: ${e.message || text.slice(0, 800)}`);
   }
 
   if (!upRes.ok) {
@@ -179,11 +203,9 @@ async function waitActive(apiKey, fileName) {
 
     let json;
     try {
-      consiole.log("-----------------------------------------------");
-    console.log(text);
-      json = JSON.parse(text);
-    } catch {
-      throw new Error(`File status ${res.status}`);
+      json = parseJsonSafe(text, "file-status");
+    } catch (e) {
+      throw new Error(`File status ${res.status}: ${e.message || text.slice(0, 300)}`);
     }
 
     if (!res.ok) throw new Error(json?.error?.message || text);
@@ -312,11 +334,9 @@ async function analyzeCasting(properties) {
 
   let genJson;
   try {
-    consiole.log("-----------------------------------------------");
-    console.log(genText);
-    genJson = JSON.parse(genText);
-  } catch {
-    throw new Error(`generateContent ${genRes.status}: ${genText.slice(0, 800)}`);
+    genJson = parseJsonSafe(genText, "generateContent");
+  } catch (e) {
+    throw new Error(`generateContent ${genRes.status}: ${e.message || genText.slice(0, 800)}`);
   }
 
   if (!genRes.ok) throw new Error(genJson?.error?.message || genText);
@@ -335,9 +355,9 @@ async function analyzeCasting(properties) {
 
   let parsed;
   try {
-    parsed = JSON.parse(outText);
-  } catch {
-    throw new Error(`Invalid JSON: ${outText.slice(0, 1200)}`);
+    parsed = parseJsonSafe(outText, "model-output");
+  } catch (e) {
+    throw new Error(`Invalid model JSON: ${e.message || outText.slice(0, 1200)}`);
   }
 
   const toStrList = (v) => Array.isArray(v) ? v.map((x) => s(x)) : v == null ? [] : [s(v)];
@@ -396,6 +416,17 @@ app.get("/jobs/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(job);
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && /json|parse/i.test(String(err.message))) {
+    return res.status(400).json({
+      error: "Invalid JSON in request body",
+      hint: "Send Content-Type: application/json. Escape inner double-quotes in strings. If a field contains raw newlines, JSON-escape them.",
+      detail: err.message,
+    });
+  }
+  next(err);
 });
 
 const PORT = process.env.PORT || 10000;
