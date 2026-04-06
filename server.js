@@ -179,6 +179,8 @@ async function waitActive(apiKey, fileName) {
 
     let json;
     try {
+      consiole.log("-----------------------------------------------");
+    console.log(text);
       json = JSON.parse(text);
     } catch {
       throw new Error(`File status ${res.status}`);
@@ -310,6 +312,8 @@ async function analyzeCasting(properties) {
 
   let genJson;
   try {
+    consiole.log("-----------------------------------------------");
+    console.log(genText);
     genJson = JSON.parse(genText);
   } catch {
     throw new Error(`generateContent ${genRes.status}: ${genText.slice(0, 800)}`);
