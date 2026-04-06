@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
+import { jsonrepair } from "jsonrepair";
 
 const UP = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES = "https://generativelanguage.googleapis.com/v1beta/files";
@@ -373,9 +374,61 @@ async function analyzeCasting(properties) {
   };
 }
 
+function normPath(p) {
+  const s = (p || "").replace(/\/$/, "") || "/";
+  return s;
+}
+
+function readBodyBuffer(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+/** Bubble often sends almost-valid JSON; parse POST /jobs here + jsonrepair fallback. */
+async function parseJobsBody(req, res, next) {
+  if (req.method !== "POST" || normPath(req.path) !== "/jobs") return next();
+  try {
+    const buf = await readBodyBuffer(req);
+    const raw = buf.toString("utf8");
+    if (!raw.trim()) {
+      req.body = {};
+      return next();
+    }
+    try {
+      req.body = JSON.parse(raw);
+    } catch (e) {
+      try {
+        req.body = JSON.parse(jsonrepair(raw));
+      } catch (e2) {
+        const m = String(e.message || "");
+        const posMatch = m.match(/position (\d+)/i);
+        const pos = posMatch ? parseInt(posMatch[1], 10) : 0;
+        return res.status(400).json({
+          error: "Invalid JSON in request body",
+          hint:
+            "In Bubble: API Connector → Body type JSON, and escape any \" inside text fields. Or send one field as Base64. Server also tried automatic repair.",
+          detail: m,
+          snippetAroundError: raw.slice(Math.max(0, pos - 60), pos + 60),
+        });
+      }
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(parseJobsBody);
+app.use((req, res, next) => {
+  if (req.method === "POST" && normPath(req.path) === "/jobs") return next();
+  express.json({ limit: "10mb" })(req, res, next);
+});
 
 const jobs = new Map();
 
