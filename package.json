@@ -2,9 +2,10 @@
   "name": "casting-render-service",
   "version": "1.0.0",
   "type": "module",
-  "main": "gemini.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node gemini.js"
+    "start": "node server.js",
+    "start:gemini": "node gemini.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
