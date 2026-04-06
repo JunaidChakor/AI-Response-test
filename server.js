@@ -60,6 +60,7 @@ const roleCharsText = (rc) => {
 
 async function fetchBinary(url) {
   const abs = normalizeUrl(url);
+  console.log("Fetching:", abs);
   if (!abs) throw new Error("Missing file URL");
 
   const res = await fetch(abs, fetchOpts);
@@ -290,7 +291,8 @@ async function analyzeCasting(properties) {
     "\nAbout: " + s(p.about_person) +
     "\nBio: " + s(p.bio) +
     "\n\nReturn ONLY a JSON object with keys: ai_score (integer 0-100), overall_assessment (string), strengths (array of strings), considerations (array of strings), recommendation (string). No markdown, no code fences, no extra text.";
-
+  console.log("prompt");
+  console.log(prompt);
   parts.push({ text: prompt });
 
   const genUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
