@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 import { jsonrepair } from "jsonrepair";
+import libre from "libreoffice-convert";
+import { promisify } from "node:util";
 
 const UP = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES = "https://generativelanguage.googleapis.com/v1beta/files";
@@ -25,6 +27,7 @@ const MIME = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const libreConvertAsync = promisify(libre.convert);
 
 const ext = (n) => {
   const i = String(n || "").lastIndexOf(".");
@@ -193,6 +196,27 @@ async function uploadVideoWithMovFallback(apiKey, buffer, filename, preferredMim
   }
 }
 
+async function convertOfficeToPdfIfNeeded(fileBuffer, filename, mimeType) {
+  const name = String(filename || "resume").toLowerCase();
+  const isDoc = mimeType === "application/msword" || name.endsWith(".doc");
+  const isDocx =
+    mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    name.endsWith(".docx");
+  if (!isDoc && !isDocx) {
+    return { buffer: fileBuffer, mimeType, filename };
+  }
+  try {
+    const pdfBuf = await libreConvertAsync(fileBuffer, ".pdf", undefined);
+    const outName = String(filename || "resume").replace(/\.(docx?|DOCX?)$/, ".pdf");
+    return { buffer: pdfBuf, mimeType: "application/pdf", filename: outName };
+  } catch (e) {
+    throw new Error(
+      "DOC/DOCX to PDF conversion failed on server. Install LibreOffice in runtime or upload PDF directly. Details: " +
+        String(e?.message || e)
+    );
+  }
+}
+
 async function waitActive(apiKey, fileName) {
   const id = String(fileName).replace(/^files\//, "");
   const url = `${FILES}/${encodeURIComponent(id)}?key=${encodeURIComponent(apiKey)}`;
@@ -247,7 +271,18 @@ async function analyzeCasting(properties) {
   if (resumeUrl) {
     const rf = await fetchBinary(resumeUrl);
     if (rf.size > LIM.r) throw new Error("Resume too large");
-    const rUp = await upload(apiKey, rf.buffer, rf.name || "resume.pdf", guessMime(rf.name, "application/pdf"));
+    const resumeMime = guessMime(rf.name, "application/pdf");
+    const normalizedResume = await convertOfficeToPdfIfNeeded(
+      rf.buffer,
+      rf.name || "resume",
+      resumeMime
+    );
+    const rUp = await upload(
+      apiKey,
+      normalizedResume.buffer,
+      normalizedResume.filename || "resume.pdf",
+      normalizedResume.mimeType || "application/pdf"
+    );
     await waitActive(apiKey, rUp.name);
     parts.push({ file_data: { mime_type: rUp.mimeType, file_uri: rUp.uri } });
     resumeProvided = true;
