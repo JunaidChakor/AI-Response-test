@@ -431,12 +431,88 @@ app.use((req, res, next) => {
 });
 
 const jobs = new Map();
+const pendingQueue = [];
+let activeWorkers = 0;
+
+const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.MAX_CONCURRENT_JOBS || 2));
+const MAX_QUEUE_SIZE = Math.max(1, Number(process.env.MAX_QUEUE_SIZE || 200));
+const JOB_TTL_MS = Math.max(60000, Number(process.env.JOB_TTL_MS || 24 * 60 * 60 * 1000));
+
+function queueDepth() {
+  return pendingQueue.length;
+}
+
+function totalOutstandingJobs() {
+  return queueDepth() + activeWorkers;
+}
+
+function pumpQueue() {
+  while (activeWorkers < MAX_CONCURRENT_JOBS && pendingQueue.length > 0) {
+    const item = pendingQueue.shift();
+    if (!item) break;
+    const { jobId, payload } = item;
+    const existing = jobs.get(jobId);
+    if (!existing || existing.status !== "queued") continue;
+
+    activeWorkers += 1;
+    jobs.set(jobId, { ...existing, status: "processing", startedAt: new Date().toISOString() });
+
+    (async () => {
+      try {
+        const result = await analyzeCasting(payload);
+        const curr = jobs.get(jobId);
+        if (curr) {
+          jobs.set(jobId, {
+            ...curr,
+            status: "completed",
+            completedAt: new Date().toISOString(),
+            result,
+          });
+        }
+      } catch (err) {
+        const curr = jobs.get(jobId);
+        if (curr) {
+          jobs.set(jobId, {
+            ...curr,
+            status: "failed",
+            completedAt: new Date().toISOString(),
+            error: String(err?.message || err),
+          });
+        }
+      } finally {
+        activeWorkers = Math.max(0, activeWorkers - 1);
+        setImmediate(pumpQueue);
+      }
+    })();
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs.entries()) {
+    const terminal = job.status === "completed" || job.status === "failed";
+    if (!terminal) continue;
+    const doneAt = new Date(job.completedAt || job.createdAt || now).getTime();
+    if (now - doneAt > JOB_TTL_MS) jobs.delete(id);
+  }
+}, 5 * 60 * 1000);
 
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "casting-render-service" });
 });
 
 app.post("/jobs", (req, res) => {
+  if (queueDepth() >= MAX_QUEUE_SIZE) {
+    return res.status(429).json({
+      error: "Queue is full",
+      hint: "Please retry shortly.",
+      queue_depth: queueDepth(),
+      max_queue_size: MAX_QUEUE_SIZE,
+      active_workers: activeWorkers,
+      max_concurrent_jobs: MAX_CONCURRENT_JOBS,
+    });
+  }
+
   const jobId = uuidv4();
 
   jobs.set(jobId, {
@@ -447,28 +523,33 @@ app.post("/jobs", (req, res) => {
     error: null,
   });
 
-  res.json({ job_id: jobId, status: "queued" });
-
-  setImmediate(async () => {
-    jobs.set(jobId, { ...jobs.get(jobId), status: "processing" });
-
-    try {
-      const result = await analyzeCasting(req.body);
-      jobs.set(jobId, { ...jobs.get(jobId), status: "completed", result });
-    } catch (err) {
-      jobs.set(jobId, {
-        ...jobs.get(jobId),
-        status: "failed",
-        error: String(err?.message || err),
-      });
-    }
+  pendingQueue.push({ jobId, payload: req.body || {} });
+  res.json({
+    job_id: jobId,
+    status: "queued",
+    queue_position: queueDepth(),
+    queue_depth: queueDepth(),
+    active_workers: activeWorkers,
   });
+  setImmediate(pumpQueue);
 });
 
 app.get("/jobs/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Job not found" });
   res.json(job);
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    queue_depth: queueDepth(),
+    active_workers: activeWorkers,
+    max_concurrent_jobs: MAX_CONCURRENT_JOBS,
+    max_queue_size: MAX_QUEUE_SIZE,
+    total_outstanding: totalOutstandingJobs(),
+    jobs_tracked: jobs.size,
+  });
 });
 
 app.use((err, req, res, next) => {
