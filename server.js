@@ -355,33 +355,53 @@ async function analyzeCasting(properties) {
   console.log(prompt);
   parts.push({ text: prompt });
 
-  const genUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const callGenerateContent = async (modelName) => {
+    const genUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const genRes = await fetch(genUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
+    });
 
-  const genRes = await fetch(genUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts }],
-      generationConfig: { responseMimeType: "application/json" },
-    }),
-  });
+    const genText = await genRes.text();
+    let genJson;
+    try {
+      genJson = parseJsonSafe(genText, "generateContent");
+    } catch (e) {
+      throw new Error(`generateContent ${genRes.status}: ${e.message || genText.slice(0, 800)}`);
+    }
+    return { genRes, genText, genJson, modelName };
+  };
 
-  const genText = await genRes.text();
+  const shouldFallbackToFlashLite = (resp) => {
+    if (!resp || resp.genRes.ok) return false;
+    if (resp.modelName !== "gemini-2.5-flash") return false;
 
-  let genJson;
-  try {
-    genJson = parseJsonSafe(genText, "generateContent");
-  } catch (e) {
-    throw new Error(`generateContent ${genRes.status}: ${e.message || genText.slice(0, 800)}`);
+    const status = Number(resp.genRes.status);
+    const message = String(resp.genJson?.error?.message || resp.genText || "").toLowerCase();
+    const isCapacityStatus = status === 429 || status === 503;
+    const isHighDemand =
+      message.includes("currently experiencing high demand") ||
+      message.includes("spikes in demand") ||
+      message.includes("try again later");
+    return isCapacityStatus && isHighDemand;
+  };
+
+  let genAttempt = await callGenerateContent(model);
+  if (shouldFallbackToFlashLite(genAttempt)) {
+    genAttempt = await callGenerateContent("gemini-2.5-flash-lite");
   }
 
-  if (!genRes.ok) throw new Error(genJson?.error?.message || genText);
-  if (!genJson.candidates?.length) {
-    const br = genJson?.promptFeedback?.blockReason || "";
+  if (!genAttempt.genRes.ok) throw new Error(genAttempt.genJson?.error?.message || genAttempt.genText);
+  if (!genAttempt.genJson.candidates?.length) {
+    const br = genAttempt.genJson?.promptFeedback?.blockReason || "";
     throw new Error(`Gemini returned no candidates. ${br}`);
   }
 
-  const cand = genJson.candidates[0];
+  const cand = genAttempt.genJson.candidates[0];
   const outParts = cand?.content?.parts || [];
   let outText = "";
   for (const part of outParts) outText += part.text || "";
