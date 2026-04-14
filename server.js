@@ -646,10 +646,6 @@ app.post("/jobs", (req, res) => {
     return res.status(429).json({
       error: "Queue is full",
       hint: "Please retry shortly.",
-      queue_depth: queueDepth(),
-      max_queue_size: MAX_QUEUE_SIZE,
-      active_workers: activeWorkers,
-      max_concurrent_jobs: MAX_CONCURRENT_JOBS,
     });
   }
 
@@ -667,16 +663,7 @@ app.post("/jobs", (req, res) => {
   });
 
   pendingQueue.push({ jobId, payload });
-  res.status(202).json({
-    accepted: true,
-    status: "queued",
-    callback_url: payload.callback_url || DEFAULT_BUBBLE_CALLBACK_URL,
-    role_id: payload.role_id ?? null,
-    video_link: payload.video_link || null,
-    queue_position: queueDepth(),
-    queue_depth: queueDepth(),
-    active_workers: activeWorkers,
-  });
+  res.status(200).json({ ok: true, status: "accepted" });
   setImmediate(pumpQueue);
 });
 
