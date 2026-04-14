@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 
 const UP = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES = "https://generativelanguage.googleapis.com/v1beta/files";
+const DEFAULT_BUBBLE_CALLBACK_URL =
+  "https://castingsource.bubbleapps.io/version-836j0/api/1.1/wf/ai_response/initialize";
 
 const LIM = {
   v: 500 * 1024 * 1024,
@@ -390,9 +392,28 @@ async function analyzeCasting(properties) {
     return isCapacityStatus && isHighDemand;
   };
 
-  let genAttempt = await callGenerateContent(model);
-  if (shouldFallbackToFlashLite(genAttempt)) {
-    genAttempt = await callGenerateContent("gemini-2.5-flash-lite");
+  const flashMaxAttempts = Math.max(1, Number(process.env.FLASH_MAX_ATTEMPTS || 4));
+  const allowFlashLiteFallback = String(process.env.ALLOW_FLASH_LITE_FALLBACK || "true").toLowerCase() !== "false";
+
+  let genAttempt;
+  if (model === "gemini-2.5-flash") {
+    for (let attempt = 1; attempt <= flashMaxAttempts; attempt++) {
+      genAttempt = await callGenerateContent(model);
+      if (genAttempt.genRes.ok) break;
+
+      const shouldRetryFlash = shouldFallbackToFlashLite(genAttempt) && attempt < flashMaxAttempts;
+      if (!shouldRetryFlash) break;
+
+      const baseBackoffMs = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
+      const jitterMs = Math.floor(Math.random() * 400);
+      await sleep(baseBackoffMs + jitterMs);
+    }
+
+    if (allowFlashLiteFallback && shouldFallbackToFlashLite(genAttempt)) {
+      genAttempt = await callGenerateContent("gemini-2.5-flash-lite");
+    }
+  } else {
+    genAttempt = await callGenerateContent(model);
   }
 
   if (!genAttempt.genRes.ok) throw new Error(genAttempt.genJson?.error?.message || genAttempt.genText);
@@ -407,7 +428,7 @@ async function analyzeCasting(properties) {
   for (const part of outParts) outText += part.text || "";
   outText = outText.trim();
 
-  if (!outText) throw new Error(`Empty model text: ${genText.slice(0, 500)}`);
+  if (!outText) throw new Error(`Empty model text: ${genAttempt.genText.slice(0, 500)}`);
 
   let parsed;
   try {
@@ -427,6 +448,42 @@ async function analyzeCasting(properties) {
     recommendation: s(parsed.recommendation),
     ai_score: aiScore,
   };
+}
+
+async function sendBubbleCallback(payload, callbackUrl) {
+  const url = normalizeUrl(callbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
+  if (!url) throw new Error("Missing callback URL");
+
+  const maxAttempts = Math.max(1, Number(process.env.CALLBACK_MAX_ATTEMPTS || 4));
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) return;
+
+      const t = await res.text();
+      const retryable = res.status === 408 || res.status === 409 || res.status === 425 || res.status === 429 || res.status >= 500;
+      if (!retryable) {
+        throw new Error(`Callback failed ${res.status}: ${t.slice(0, 800)}`);
+      }
+      lastErr = new Error(`Retryable callback failure ${res.status}: ${t.slice(0, 800)}`);
+    } catch (e) {
+      lastErr = e;
+    }
+
+    if (attempt < maxAttempts) {
+      const backoffMs = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
+      await sleep(backoffMs);
+    }
+  }
+
+  throw new Error(`Bubble callback failed after retries: ${String(lastErr?.message || lastErr)}`);
 }
 
 function normPath(p) {
@@ -490,7 +547,7 @@ const pendingQueue = [];
 let activeWorkers = 0;
 
 const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.MAX_CONCURRENT_JOBS || 2));
-const MAX_QUEUE_SIZE = Math.max(1, Number(process.env.MAX_QUEUE_SIZE || 200));
+const MAX_QUEUE_SIZE = Math.max(1, Number(process.env.MAX_QUEUE_SIZE || 5000));
 const JOB_TTL_MS = Math.max(60000, Number(process.env.JOB_TTL_MS || 24 * 60 * 60 * 1000));
 
 function queueDepth() {
@@ -524,6 +581,18 @@ function pumpQueue() {
             result,
           });
         }
+
+        await sendBubbleCallback(
+          {
+            status: "completed",
+            user_id: payload.user_id ?? null,
+            role_id: payload.role_id ?? null,
+            video_link: payload.video_link ?? payload.video_url ?? null,
+            more_info: payload.more_info ?? null,
+            ...result,
+          },
+          payload.callback_url
+        );
       } catch (err) {
         const curr = jobs.get(jobId);
         if (curr) {
@@ -533,6 +602,22 @@ function pumpQueue() {
             completedAt: new Date().toISOString(),
             error: String(err?.message || err),
           });
+        }
+
+        try {
+          await sendBubbleCallback(
+            {
+              status: "failed",
+              user_id: payload.user_id ?? null,
+              role_id: payload.role_id ?? null,
+              video_link: payload.video_link ?? payload.video_url ?? null,
+              more_info: payload.more_info ?? null,
+              error: String(err?.message || err),
+            },
+            payload.callback_url
+          );
+        } catch (cbErr) {
+          console.error("Bubble callback failure:", String(cbErr?.message || cbErr));
         }
       } finally {
         activeWorkers = Math.max(0, activeWorkers - 1);
@@ -569,6 +654,9 @@ app.post("/jobs", (req, res) => {
   }
 
   const jobId = uuidv4();
+  const payload = req.body || {};
+  payload.video_link = payload.video_link || payload.video_url || "";
+  payload.video_url = payload.video_url || payload.video_link || "";
 
   jobs.set(jobId, {
     id: jobId,
@@ -578,10 +666,13 @@ app.post("/jobs", (req, res) => {
     error: null,
   });
 
-  pendingQueue.push({ jobId, payload: req.body || {} });
-  res.json({
-    job_id: jobId,
+  pendingQueue.push({ jobId, payload });
+  res.status(202).json({
+    accepted: true,
     status: "queued",
+    callback_url: payload.callback_url || DEFAULT_BUBBLE_CALLBACK_URL,
+    role_id: payload.role_id ?? null,
+    video_link: payload.video_link || null,
     queue_position: queueDepth(),
     queue_depth: queueDepth(),
     active_workers: activeWorkers,
