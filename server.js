@@ -53,6 +53,14 @@ const fetchOpts = {
 };
 
 const s = (v) => (v == null ? "" : String(v).replace(/\0/g, ""));
+const cleanApiKey = (v) => {
+  if (v == null) return "";
+  const t = String(v).trim();
+  if (!t) return "";
+  const lower = t.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "none" || lower === "false") return "";
+  return t;
+};
 
 /** Parse JSON from Gemini/HTTP bodies; strips BOM, markdown fences, or leading junk. */
 function parseJsonSafe(raw, label) {
@@ -247,7 +255,7 @@ async function waitActive(apiKey, fileName) {
 
 async function analyzeCasting(properties) {
   const p = properties || {};
-  const apiKey = p.gemini_api_key || p.api_key || process.env.GEMINI_API_KEY;
+  const apiKey = cleanApiKey(p.gemini_api_key) || cleanApiKey(p.api_key) || cleanApiKey(process.env.GEMINI_API_KEY);
   const model = p.model || "gemini-2.5-flash";
   const videoUrl = normalizeUrl(p.video_url);
 
