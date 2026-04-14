@@ -603,7 +603,7 @@ function pumpQueue() {
             user_id: payload.user_id ?? null,
             role_id: payload.role_id ?? null,
             video_link: payload.video_link ?? payload.video_url ?? null,
-            more_info: payload.more_info ?? null,
+            more_info: payload.about_person ?? null,
             ...result,
           },
           payload.callback_url
@@ -626,7 +626,7 @@ function pumpQueue() {
               user_id: payload.user_id ?? null,
               role_id: payload.role_id ?? null,
               video_link: payload.video_link ?? payload.video_url ?? null,
-              more_info: payload.more_info ?? null,
+              more_info: payload.about_person ?? null,
               error: String(err?.message || err),
             },
             payload.callback_url
