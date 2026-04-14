@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const UP = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES = "https://generativelanguage.googleapis.com/v1beta/files";
 const DEFAULT_BUBBLE_CALLBACK_URL =
-  "https://castingsource.bubbleapps.io/version-836j0/api/1.1/wf/ai_response/initialize";
+  "https://castingsource.bubbleapps.io/version-836j0/api/1.1/wf/ai_response";
 
 const LIM = {
   v: 500 * 1024 * 1024,
@@ -451,30 +451,37 @@ async function analyzeCasting(properties) {
 }
 
 async function sendBubbleCallback(payload, callbackUrl) {
-  const url = normalizeUrl(callbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
-  if (!url) throw new Error("Missing callback URL");
+  const baseUrl = normalizeUrl(callbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
+  if (!baseUrl) throw new Error("Missing callback URL");
+  const callbackCandidates = [];
+  const withoutInitialize = baseUrl.replace(/\/initialize(?:\?.*)?$/i, "");
+  callbackCandidates.push(baseUrl);
+  if (withoutInitialize && withoutInitialize !== baseUrl) callbackCandidates.push(withoutInitialize);
 
   const maxAttempts = Math.max(1, Number(process.env.CALLBACK_MAX_ATTEMPTS || 4));
   let lastErr = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    for (const url of callbackCandidates) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      if (res.ok) return;
+        if (res.ok) return;
 
-      const t = await res.text();
-      const retryable = res.status === 408 || res.status === 409 || res.status === 425 || res.status === 429 || res.status >= 500;
-      if (!retryable) {
-        throw new Error(`Callback failed ${res.status}: ${t.slice(0, 800)}`);
+        const t = await res.text();
+        const retryable =
+          res.status === 408 || res.status === 409 || res.status === 425 || res.status === 429 || res.status >= 500;
+        if (!retryable) {
+          throw new Error(`Callback failed ${res.status}: ${t.slice(0, 800)}`);
+        }
+        lastErr = new Error(`Retryable callback failure ${res.status}: ${t.slice(0, 800)}`);
+      } catch (e) {
+        lastErr = e;
       }
-      lastErr = new Error(`Retryable callback failure ${res.status}: ${t.slice(0, 800)}`);
-    } catch (e) {
-      lastErr = e;
     }
 
     if (attempt < maxAttempts) {
