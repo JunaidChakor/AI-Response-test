@@ -62,6 +62,20 @@ const cleanApiKey = (v) => {
   return t;
 };
 
+function logError(stage, err, context = {}) {
+  const message = String(err?.message || err);
+  const stack = err?.stack ? String(err.stack).split("\n").slice(0, 6).join("\n") : "";
+  console.error(`[error] ${stage}: ${message}`);
+  if (Object.keys(context).length) {
+    try {
+      console.error("[error-context]", JSON.stringify(context));
+    } catch {
+      console.error("[error-context]", context);
+    }
+  }
+  if (stack) console.error(stack);
+}
+
 /** Parse JSON from Gemini/HTTP bodies; strips BOM, markdown fences, or leading junk. */
 function parseJsonSafe(raw, label) {
   let t = String(raw ?? "").trim();
@@ -377,10 +391,15 @@ async function analyzeCasting(properties) {
     });
 
     const genText = await genRes.text();
+    console.log(`[gemini] model=${modelName} status=${genRes.status}`);
+    if (!genRes.ok) {
+      console.error(`[gemini] non-ok response body snippet: ${genText.slice(0, 1000)}`);
+    }
     let genJson;
     try {
       genJson = parseJsonSafe(genText, "generateContent");
     } catch (e) {
+      logError("gemini-parse-response", e, { modelName, status: genRes.status, bodySnippet: genText.slice(0, 1000) });
       throw new Error(`generateContent ${genRes.status}: ${e.message || genText.slice(0, 800)}`);
     }
     return { genRes, genText, genJson, modelName };
@@ -472,15 +491,20 @@ async function sendBubbleCallback(payload, callbackUrl) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     for (const url of callbackCandidates) {
       try {
+        console.log(`[callback] attempt=${attempt}/${maxAttempts} url=${url}`);
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
 
-        if (res.ok) return;
+        if (res.ok) {
+          console.log(`[callback] success status=${res.status} url=${url}`);
+          return;
+        }
 
         const t = await res.text();
+        console.error(`[callback] non-ok status=${res.status} url=${url} body=${t.slice(0, 1000)}`);
         const retryable =
           res.status === 408 || res.status === 409 || res.status === 425 || res.status === 429 || res.status >= 500;
         if (!retryable) {
@@ -488,6 +512,7 @@ async function sendBubbleCallback(payload, callbackUrl) {
         }
         lastErr = new Error(`Retryable callback failure ${res.status}: ${t.slice(0, 800)}`);
       } catch (e) {
+        logError("bubble-callback-attempt", e, { attempt, url });
         lastErr = e;
       }
     }
@@ -582,6 +607,9 @@ function pumpQueue() {
     if (!existing || existing.status !== "queued") continue;
 
     activeWorkers += 1;
+    console.log(
+      `[jobs] start id=${jobId} queue_depth=${queueDepth()} active_workers=${activeWorkers} role_id=${payload?.role_id ?? ""} user_id=${payload?.user_id ?? ""}`
+    );
     jobs.set(jobId, { ...existing, status: "processing", startedAt: new Date().toISOString() });
 
     (async () => {
@@ -596,6 +624,7 @@ function pumpQueue() {
             result,
           });
         }
+        console.log(`[jobs] completed id=${jobId}`);
 
         await sendBubbleCallback(
           {
@@ -609,6 +638,12 @@ function pumpQueue() {
           payload.callback_url
         );
       } catch (err) {
+        logError("job-processing", err, {
+          jobId,
+          role_id: payload?.role_id ?? null,
+          user_id: payload?.user_id ?? null,
+          video_link: payload?.video_link ?? payload?.video_url ?? null,
+        });
         const curr = jobs.get(jobId);
         if (curr) {
           jobs.set(jobId, {
@@ -632,7 +667,7 @@ function pumpQueue() {
             payload.callback_url
           );
         } catch (cbErr) {
-          console.error("Bubble callback failure:", String(cbErr?.message || cbErr));
+          logError("bubble-callback-final-failure", cbErr, { jobId, callback_url: payload?.callback_url ?? null });
         }
       } finally {
         activeWorkers = Math.max(0, activeWorkers - 1);
