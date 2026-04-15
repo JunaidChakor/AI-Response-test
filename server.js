@@ -61,6 +61,14 @@ const cleanApiKey = (v) => {
   if (lower === "null" || lower === "undefined" || lower === "none" || lower === "false") return "";
   return t;
 };
+const cleanOptionalUrl = (v) => {
+  if (v == null) return "";
+  const t = String(v).trim();
+  if (!t) return "";
+  const lower = t.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "none" || lower === "false") return "";
+  return t;
+};
 
 function logError(stage, err, context = {}) {
   const message = String(err?.message || err);
@@ -478,8 +486,12 @@ async function analyzeCasting(properties) {
 }
 
 async function sendBubbleCallback(payload, callbackUrl) {
-  const baseUrl = normalizeUrl(callbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
+  const requestedCallbackUrl = cleanOptionalUrl(callbackUrl);
+  const baseUrl = normalizeUrl(requestedCallbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
   if (!baseUrl) throw new Error("Missing callback URL");
+  if (/^https?:\/\/null(?:\/|$)/i.test(baseUrl) || /^https?:\/\/undefined(?:\/|$)/i.test(baseUrl)) {
+    throw new Error(`Invalid callback URL after normalization: ${baseUrl}`);
+  }
   const callbackCandidates = [];
   const withoutInitialize = baseUrl.replace(/\/initialize(?:\?.*)?$/i, "");
   callbackCandidates.push(baseUrl);
