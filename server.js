@@ -7,8 +7,6 @@ import { promisify } from "node:util";
 
 const UP = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES = "https://generativelanguage.googleapis.com/v1beta/files";
-const DEFAULT_BUBBLE_CALLBACK_URL =
-  "https://castingsource.bubbleapps.io/version-836j0/api/1.1/wf/ai_response";
 
 const LIM = {
   v: 500 * 1024 * 1024,
@@ -68,6 +66,23 @@ const cleanOptionalUrl = (v) => {
   const lower = t.toLowerCase();
   if (lower === "null" || lower === "undefined" || lower === "none" || lower === "false") return "";
   return t;
+};
+const parseModelList = (v) => {
+  if (Array.isArray(v)) return v.map((x) => String(x || "").trim()).filter(Boolean);
+  const t = String(v || "").trim();
+  if (!t) return [];
+  if (t.startsWith("[") && t.endsWith("]")) {
+    try {
+      const arr = JSON.parse(t);
+      if (Array.isArray(arr)) return arr.map((x) => String(x || "").trim()).filter(Boolean);
+    } catch {
+      /* fall through to CSV parsing */
+    }
+  }
+  return t
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 };
 
 function logError(stage, err, context = {}) {
@@ -278,10 +293,16 @@ async function waitActive(apiKey, fileName) {
 async function analyzeCasting(properties) {
   const p = properties || {};
   const apiKey = cleanApiKey(p.gemini_api_key) || cleanApiKey(p.api_key) || cleanApiKey(process.env.GEMINI_API_KEY);
-  const model = p.model || "gemini-2.5-flash";
+  const requestModelList = parseModelList(p.models);
+  const envModelList = parseModelList(process.env.MODEL_PRIORITY);
+  const modelPriority = Array.from(new Set([...requestModelList, ...envModelList].filter(Boolean)));
   const videoUrl = normalizeUrl(p.video_url);
 
   if (!apiKey) throw new Error("gemini_api_key required or set GEMINI_API_KEY env var");
+  if (!modelPriority.length) {
+    throw new Error("No models configured. Provide `models` in request or set MODEL_PRIORITY env var.");
+  }
+  console.log(`[model-selection] priority=${modelPriority.join(" -> ")}`);
   if (!videoUrl) throw new Error("video_url required");
 
   const resumeUrl = p.resume_url ? normalizeUrl(p.resume_url) : "";
@@ -413,45 +434,47 @@ async function analyzeCasting(properties) {
     return { genRes, genText, genJson, modelName };
   };
 
-  const shouldFallbackToFlashLite = (resp) => {
+  const isRetryableModelError = (resp) => {
     if (!resp || resp.genRes.ok) return false;
-    if (resp.modelName !== "gemini-2.5-flash") return false;
-
     const status = Number(resp.genRes.status);
     const message = String(resp.genJson?.error?.message || resp.genText || "").toLowerCase();
-    const isCapacityStatus = status === 429 || status === 503;
+    const isCapacityStatus = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
     const isHighDemand =
       message.includes("currently experiencing high demand") ||
       message.includes("spikes in demand") ||
-      message.includes("try again later");
-    return isCapacityStatus && isHighDemand;
+      message.includes("try again later") ||
+      message.includes("resource_exhausted") ||
+      message.includes("rate limit");
+    return isCapacityStatus || isHighDemand;
   };
 
-  const flashMaxAttempts = Math.max(1, Number(process.env.FLASH_MAX_ATTEMPTS || 4));
-  const allowFlashLiteFallback = String(process.env.ALLOW_FLASH_LITE_FALLBACK || "true").toLowerCase() !== "false";
+  const maxAttemptsPerModel = Math.max(1, Number(process.env.MODEL_MAX_ATTEMPTS || 3));
+  let genAttempt = null;
+  let finalError = null;
 
-  let genAttempt;
-  if (model === "gemini-2.5-flash") {
-    for (let attempt = 1; attempt <= flashMaxAttempts; attempt++) {
-      genAttempt = await callGenerateContent(model);
+  for (let modelIndex = 0; modelIndex < modelPriority.length; modelIndex++) {
+    const modelName = modelPriority[modelIndex];
+    console.log(`[model-selection] trying model=${modelName} order=${modelIndex + 1}/${modelPriority.length}`);
+
+    for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+      genAttempt = await callGenerateContent(modelName);
       if (genAttempt.genRes.ok) break;
 
-      const shouldRetryFlash = shouldFallbackToFlashLite(genAttempt) && attempt < flashMaxAttempts;
-      if (!shouldRetryFlash) break;
+      finalError = new Error(genAttempt.genJson?.error?.message || genAttempt.genText || "Model request failed");
+      const shouldRetry = isRetryableModelError(genAttempt) && attempt < maxAttemptsPerModel;
+      if (!shouldRetry) break;
 
-      const baseBackoffMs = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
-      const jitterMs = Math.floor(Math.random() * 400);
+      const baseBackoffMs = Math.min(20000, 1200 * Math.pow(2, attempt - 1));
+      const jitterMs = Math.floor(Math.random() * 500);
       await sleep(baseBackoffMs + jitterMs);
     }
 
-    if (allowFlashLiteFallback && shouldFallbackToFlashLite(genAttempt)) {
-      genAttempt = await callGenerateContent("gemini-2.5-flash-lite");
-    }
-  } else {
-    genAttempt = await callGenerateContent(model);
+    if (genAttempt?.genRes?.ok) break;
   }
 
-  if (!genAttempt.genRes.ok) throw new Error(genAttempt.genJson?.error?.message || genAttempt.genText);
+  if (!genAttempt || !genAttempt.genRes.ok) {
+    throw finalError || new Error(genAttempt?.genJson?.error?.message || genAttempt?.genText || "Model request failed");
+  }
   if (!genAttempt.genJson.candidates?.length) {
     const br = genAttempt.genJson?.promptFeedback?.blockReason || "";
     throw new Error(`Gemini returned no candidates. ${br}`);
@@ -487,7 +510,8 @@ async function analyzeCasting(properties) {
 
 async function sendBubbleCallback(payload, callbackUrl) {
   const requestedCallbackUrl = cleanOptionalUrl(callbackUrl);
-  const baseUrl = normalizeUrl(requestedCallbackUrl || DEFAULT_BUBBLE_CALLBACK_URL);
+  const configuredDefaultCallbackUrl = cleanOptionalUrl(process.env.BUBBLE_CALLBACK_URL);
+  const baseUrl = normalizeUrl(requestedCallbackUrl || configuredDefaultCallbackUrl);
   if (!baseUrl) throw new Error("Missing callback URL");
   if (/^https?:\/\/null(?:\/|$)/i.test(baseUrl) || /^https?:\/\/undefined(?:\/|$)/i.test(baseUrl)) {
     throw new Error(`Invalid callback URL after normalization: ${baseUrl}`);
