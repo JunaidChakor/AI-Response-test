@@ -620,7 +620,7 @@ function pumpQueue() {
 
     activeWorkers += 1;
     console.log(
-      `[jobs] start id=${jobId} queue_depth=${queueDepth()} active_workers=${activeWorkers} role_id=${payload?.role_id ?? ""} user_id=${payload?.user_id ?? ""}`
+      `[jobs] start id=${jobId} queue_depth=${queueDepth()} active_workers=${activeWorkers} application_id=${payload?.application_id ?? ""}`
     );
     jobs.set(jobId, { ...existing, status: "processing", startedAt: new Date().toISOString() });
 
@@ -641,10 +641,8 @@ function pumpQueue() {
         await sendBubbleCallback(
           {
             status: "completed",
-            user_id: payload.user_id ?? null,
-            role_id: payload.role_id ?? null,
+            application_id: payload.application_id ?? null,
             video_link: payload.video_link ?? payload.video_url ?? null,
-            more_info: payload.about_person ?? null,
             ...result,
           },
           payload.callback_url
@@ -652,8 +650,7 @@ function pumpQueue() {
       } catch (err) {
         logError("job-processing", err, {
           jobId,
-          role_id: payload?.role_id ?? null,
-          user_id: payload?.user_id ?? null,
+          application_id: payload?.application_id ?? null,
           video_link: payload?.video_link ?? payload?.video_url ?? null,
         });
         const curr = jobs.get(jobId);
@@ -670,10 +667,8 @@ function pumpQueue() {
           await sendBubbleCallback(
             {
               status: "failed",
-              user_id: payload.user_id ?? null,
-              role_id: payload.role_id ?? null,
+              application_id: payload.application_id ?? null,
               video_link: payload.video_link ?? payload.video_url ?? null,
-              more_info: payload.about_person ?? null,
               error: String(err?.message || err),
             },
             payload.callback_url
