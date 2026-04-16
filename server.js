@@ -389,6 +389,7 @@ async function analyzeCasting(properties) {
     "\nRole Characteristics: " + roleCharsText(p.role_characteristics) +
     "\nAge Range: " + s(p.age_range) +
     "\nCountry: " + s(p.country) +
+    "\nState: " + s(p.role_state) +
     "\nCity: " + s(p.city) +
     "\nMinimum Height: " + s(p.minimum_height) +
     "\nMaximum Height: " + s(p.maximum_height) +
@@ -397,6 +398,7 @@ async function analyzeCasting(properties) {
     "Gender: " + s(p.user_gender) +
     "\nAge: " + s(p.user_age) +
     "\nCity: " + s(p.user_city) +
+    "\nState: " + s(p.user_state) +
     "\nCountry: " + s(p.user_country) +
     "\nHeight: " + s(p.user_height) +
     "\nHeadshot URL (text field): " + (headshotText || "(not provided)") +
